@@ -1,0 +1,94 @@
+name: Terraform CI (Plan)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/**"
+
+concurrency:
+  group: tf-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  detect-changes:
+    name: Detect Changed Environments
+    runs-on: ubuntu-latest
+    outputs:
+      dev_changed: ${{ steps.filter.outputs.dev_changed }}
+      uat_changed: ${{ steps.filter.outputs.uat_changed }}
+      prod_changed: ${{ steps.filter.outputs.prod_changed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            dev_changed:
+              - 'terraform/dev/**'
+            uat_changed:
+              - 'terraform/uat/**'
+            prod_changed:
+              - 'terraform/prod/**'
+
+  plan-dev:
+    name: Plan / dev
+    needs: detect-changes
+    if: needs.detect-changes.outputs.dev_changed == 'true'
+    uses: ./.github/workflows/_terraform-core.yml
+    with:
+      environment: dev
+      action: plan
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_DEV }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_DEV }}
+
+  plan-uat:
+    name: Plan / uat
+    needs: detect-changes
+    if: needs.detect-changes.outputs.uat_changed == 'true'
+    uses: ./.github/workflows/_terraform-core.yml
+    with:
+      environment: uat
+      action: plan
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_UAT }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_UAT }}
+
+  plan-prod:
+    name: Plan / prod
+    needs: detect-changes
+    if: needs.detect-changes.outputs.prod_changed == 'true'
+    uses: ./.github/workflows/_terraform-core.yml
+    with:
+      environment: prod
+      action: plan
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_PROD }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_PROD }}
+
+  plan-success:
+    name: All Plans Passed
+    needs: [plan-dev, plan-uat, plan-prod]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Plan Results
+        run: |
+          if [[ "${{ needs.plan-dev.result }}" == "failure" ]] || \
+             [[ "${{ needs.plan-uat.result }}" == "failure" ]] || \
+             [[ "${{ needs.plan-prod.result }}" == "failure" ]]; then
+            echo "::error::One or more Terraform plans failed"
+            exit 1
+          fi
+          if [[ "${{ needs.plan-dev.result }}" == "skipped" ]] && \
+             [[ "${{ needs.plan-uat.result }}" == "skipped" ]] && \
+             [[ "${{ needs.plan-prod.result }}" == "skipped" ]]; then
+            echo "::error::No environments were changed"
+            exit 1
+          fi
+          echo "✅ All plans passed or were skipped appropriately"

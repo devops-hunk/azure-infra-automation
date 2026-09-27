@@ -1,0 +1,106 @@
+name: Terraform CD (Deploy)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+
+concurrency:
+  group: tf-cd-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  detect-changes:
+    name: Detect Changed Environments
+    runs-on: ubuntu-latest
+    outputs:
+      dev_changed: ${{ steps.filter.outputs.dev_changed }}
+      uat_changed: ${{ steps.filter.outputs.uat_changed }}
+      prod_changed: ${{ steps.filter.outputs.prod_changed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          base: ${{ github.event.before }}
+          filters: |
+            dev_changed:
+              - 'terraform/dev/**'
+            uat_changed:
+              - 'terraform/uat/**'
+            prod_changed:
+              - 'terraform/prod/**'
+
+  # ════════════════════════════════════════════════════════
+  #  DEV DEPLOYMENT (Independent - No dependencies)
+  # ════════════════════════════════════════════════════════
+  apply-dev:
+    name: Apply / dev
+    needs: detect-changes
+    if: needs.detect-changes.outputs.dev_changed == 'true'
+    uses: ./.github/workflows/_terraform-core.yml
+    with:
+      environment: dev
+      action: apply
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_DEV }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_DEV }}
+
+  # ════════════════════════════════════════════════════════
+  #  UAT DEPLOYMENT (Independent - No dependencies)
+  # ════════════════════════════════════════════════════════
+  apply-uat:
+    name: Apply / uat
+    needs: detect-changes
+    if: needs.detect-changes.outputs.uat_changed == 'true'
+    uses: ./.github/workflows/_terraform-core.yml
+    with:
+      environment: uat
+      action: apply
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_UAT }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_UAT }}
+
+  # ════════════════════════════════════════════════════════
+  #  PROD DEPLOYMENT (Independent - No dependencies)
+  # ════════════════════════════════════════════════════════
+  apply-prod:
+    name: Apply / prod
+    needs: detect-changes
+    if: needs.detect-changes.outputs.prod_changed == 'true'
+    uses: ./.github/workflows/_terraform-core.yml
+    with:
+      environment: prod
+      action: apply
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID_PROD }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID_PROD }}
+
+  deployment-success:
+    name: Deployment Complete
+    needs: [apply-dev, apply-uat, apply-prod]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Deployment Results
+        run: |
+          if [[ "${{ needs.apply-dev.result }}" == "failure" ]] || \
+             [[ "${{ needs.apply-uat.result }}" == "failure" ]] || \
+             [[ "${{ needs.apply-prod.result }}" == "failure" ]]; then
+            echo "::error::One or more deployments failed"
+            exit 1
+          fi
+          
+          if [[ "${{ needs.apply-dev.result }}" == "skipped" ]] && \
+             [[ "${{ needs.apply-uat.result }}" == "skipped" ]] && \
+             [[ "${{ needs.apply-prod.result }}" == "skipped" ]]; then
+            echo "::warning::No environments were changed in this push"
+            exit 0
+          fi
+          
+          echo "✅ All changed environments deployed successfully"
